@@ -1,60 +1,74 @@
 import os
 import telebot
+from flask import Flask, request
 from groq import Groq
-from flask import Flask
-from threading import Thread
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+# قراءة المتغيرات السرية من إعدادات Render
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-ADMIN_ID = 8858369314
+bot = telebot.TeleBot(TOKEN)
+client = Groq(api_key=GROQ_API_KEY)
+app = Flask(__name__)
 
-bot = telebot.TeleBot(TELEGRAM_TOKEN)
-groq_client = Groq(api_key=GROQ_API_KEY)
 
-app = Flask('')
-
-@app.route('/')
+@app.route("/")
 def home():
-    return "Bot is active!"
+  return "Bot is running live!", 200
 
-def run_web():
-    app.run(host='0.0.0.0', port=8080)
 
-@bot.message_handler(commands=['start', 'help'])
-def send_welcome(message):
-    bot.reply_to(message, "أهلاً بك! أنا بوت الدراسة الذكي. يمكنك طرح أي سؤال وسأجيبك فوراً.")
+# نقطة استقبال الرسائل من تيليجرام (Webhook)
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+  json_string = request.get_data().decode("utf-8")
+  update = telebot.types.Update.de_json(json_string)
+  bot.process_new_updates([update])
+  return "!", 200
 
-@bot.message_handler(content_types=['document'])
-def handle_document(message):
-    if message.from_user.id == ADMIN_ID:
-        bot.reply_to(message, f"📥 تم استلام الملف بنجاح!")
-    else:
-        bot.reply_to(message, "🚫 عذراً، رفع الملفات متاح للمشرف فقط.")
 
-@bot.message_handler(content_types=['photo'])
-def handle_photo(message):
-    bot.reply_to(message, "⚠️ يرجى كتابة السؤال نصياً حالياً وسأقوم بحله لك!")
-
+# الرد على رسائل المستخدمين النصية
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
-    if not message.text:
-        return
-    try:
-        chat_completion = groq_client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": "أنت مساعد دراسي خبير ومبسط لطلاب الثانوية. أجب بدقة وشرح مفصل باللغة العربية."},
-                {"role": "user", "content": message.text}
-            ],
-            model="llama-3.3-70b-versatile",
-        )
-        response = chat_completion.choices[0].message.content
-        bot.reply_to(message, response)
-    except Exception as e:
-        print(f"Groq API Error: {e}")
-        bot.reply_to(message, f"خطأ من الخادم: تأكد من صحة مفتاح Groq API في إعدادات Render.")
+  try:
+    chat_id = message.chat.id
+    user_text = message.text
+
+    # إرسال رسالة انتظار مؤقتة
+    sent_msg = bot.send_message(chat_id, "جاري التفكير وصياغة الإجابة... 🤖")
+
+    # الاتصال بنموذج Groq
+    completion = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{
+            "role":
+                "system",
+            "content":
+                "أنت بوت دراسي ذكي ومساعد تعليمي ممتاز، ساعد الطالب بكل دقة واحترافية.",
+        }, {
+            "role": "user",
+            "content": user_text,
+        }],
+    )
+
+    answer = completion.choices[0].message.content
+    bot.edit_message_text(answer, chat_id=chat_id, message_id=sent_msg.message_id)
+
+  except Exception as e:
+    bot.send_message(
+        message.chat.id,
+        "عذراً، حدث خطأ في معالجة طلبك. تأكد من صحة مفتاح Groq API في إعدادات"
+        " Render.",
+    )
+
 
 if __name__ == "__main__":
-    Thread(target=run_web).start()
-    bot.infinity_polling()
-        
+  # ضبط الـ Webhook تلقائياً مع خوادم تيليجرام
+  RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
+  if RENDER_URL:
+    bot.remove_webhook()
+    bot.set_webhook(url=f"{RENDER_URL}/{TOKEN}")
+
+  # تشغيل خادم Flask
+  port = int(os.environ.get("PORT", 8080))
+  app.run(host="0.0.0.0", port=port)
+      
